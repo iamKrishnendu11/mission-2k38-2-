@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { api, getSocketUrl } from "@/lib/api";
 import DashboardLayout from "@/components/DashboardLayout";
 import io from "socket.io-client";
@@ -9,7 +10,7 @@ import {
   Video as VideoIcon, X, Search, Plus, Play, Check, CheckCheck, Eye
 } from "lucide-react";
 
-export default function PlayerMessages() {
+function PlayerMessagesContent() {
   const [chats, setChats] = useState([]);
   const [loadingChats, setLoadingChats] = useState(true);
   const [selectedChat, setSelectedChat] = useState(null);
@@ -40,6 +41,9 @@ export default function PlayerMessages() {
   const socketRef = useRef(null);
   const messageEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+
+  const searchParams = useSearchParams();
+  const queryChatId = searchParams ? searchParams.get("chatId") : null;
 
   const currentUserIdStr = currentUser?.id || currentUser?._id || currentUser?.userId;
 
@@ -103,6 +107,16 @@ export default function PlayerMessages() {
       if (msg.chat === selectedChat._id) {
         setMessages(prev => {
           if (prev.some(m => String(m._id) === String(msg._id))) return prev;
+          const matchingOptimisticIdx = prev.findIndex(m =>
+            m.isOptimistic &&
+            String(m.sender) === String(msg.sender) &&
+            m.text === msg.text
+          );
+          if (matchingOptimisticIdx !== -1) {
+            const next = [...prev];
+            next[matchingOptimisticIdx] = msg;
+            return next;
+          }
           return [...prev, msg];
         });
         scrollToBottom();
@@ -145,17 +159,25 @@ export default function PlayerMessages() {
     scrollToBottom();
   }, [messages]);
 
-  const loadChatThreads = () => {
+  const loadChatThreads = async () => {
     setLoadingChats(true);
-    api.get("/social/chats")
-      .then(res => {
-        setChats(res || []);
-        setLoadingChats(false);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoadingChats(false);
-      });
+    try {
+      const res = await api.get("/social/chats");
+      const list = Array.isArray(res) ? res : [];
+      setChats(list);
+      setLoadingChats(false);
+      if (queryChatId && !selectedChat) {
+        const found = list.find(c => String(c._id) === String(queryChatId));
+        if (found) {
+          handleSelectChat(found);
+        }
+      }
+      return list;
+    } catch (err) {
+      console.error("Failed to load chat threads:", err);
+      setLoadingChats(false);
+      return [];
+    }
   };
 
   const loadChatThreadsSilent = () => {
@@ -185,10 +207,10 @@ export default function PlayerMessages() {
     try {
       const chat = await api.post("/social/chats/start", { targetUserId });
       setShowSearchModal(false);
-      await loadChatThreads();
+      const updatedList = await loadChatThreads();
       
       // Auto-select chat
-      const fullChat = chats.find(c => c._id === chat._id) || chat;
+      const fullChat = updatedList.find(c => c._id === chat._id) || chat;
       handleSelectChat(fullChat);
     } catch (err) {
       console.error("Error starting chat:", err);
@@ -297,41 +319,61 @@ export default function PlayerMessages() {
       });
     }
 
-    // Persist via HTTP REST endpoint and append to local state immediately
-    try {
-      const sentMsg = await api.post(`/social/chats/${selectedChat._id}/messages`, {
-        text: newMessageText.trim(),
-        mediaUrl: uploadedMediaUrl,
-        mediaType: uploadedMediaType
-      });
+    const textToSend = newMessageText.trim();
+    const tempId = `temp_${Date.now()}_${Math.random()}`;
+    const optimisticMsg = {
+      _id: tempId,
+      chat: selectedChat._id,
+      sender: currentUserIdStr,
+      text: textToSend,
+      mediaUrl: uploadedMediaUrl,
+      mediaType: uploadedMediaType,
+      createdAt: new Date().toISOString(),
+      isOptimistic: true
+    };
 
-      if (sentMsg) {
-        setMessages(prev => {
-          if (prev.some(m => String(m._id) === String(sentMsg._id))) return prev;
-          return [...prev, sentMsg];
-        });
-        setTimeout(() => scrollToBottom(), 50);
-      }
+    // 1. Instantly show message in the chat window (0ms perceived latency)
+    setMessages(prev => [...prev, optimisticMsg]);
+    setTimeout(() => scrollToBottom(), 20);
 
-      const snippet = newMessageText.trim() || (uploadedMediaType === 'video' ? '📹 Video Attachment' : '📷 Image Attachment');
-      setChats(prev => prev.map(ch => {
-        if (ch._id === selectedChat._id) {
-          return {
-            ...ch,
-            lastMessage: snippet,
-            lastMessageAt: new Date()
-          };
-        }
-        return ch;
-      }));
-    } catch (pErr) {
-      console.error("Failed to send message:", pErr);
-      alert("Failed to send message: " + pErr.message);
-    }
-
+    // 2. Instantly clear input field and media preview
     setNewMessageText("");
     handleClearSelectedFile();
     setIsTyping(false);
+
+    // 3. Instantly update sidebar thread snippet
+    const snippet = textToSend || (uploadedMediaType === 'video' ? '📹 Video Attachment' : '📷 Image Attachment');
+    setChats(prev => prev.map(ch => {
+      if (ch._id === selectedChat._id) {
+        return {
+          ...ch,
+          lastMessage: snippet,
+          lastMessageAt: new Date()
+        };
+      }
+      return ch;
+    }));
+
+    // 4. Persist via backend API in background
+    api.post(`/social/chats/${selectedChat._id}/messages`, {
+      text: textToSend,
+      mediaUrl: uploadedMediaUrl,
+      mediaType: uploadedMediaType
+    })
+      .then(sentMsg => {
+        if (sentMsg) {
+          setMessages(prev => {
+            if (prev.some(m => String(m._id) === String(sentMsg._id))) {
+              return prev.filter(m => m._id !== tempId);
+            }
+            return prev.map(m => (m._id === tempId ? sentMsg : m));
+          });
+        }
+      })
+      .catch(pErr => {
+        console.error("Failed to persist message:", pErr);
+        setMessages(prev => prev.map(m => (m._id === tempId ? { ...m, failed: true } : m)));
+      });
   };
 
   const handleTyping = (e) => {
@@ -563,7 +605,7 @@ export default function PlayerMessages() {
                           <div className={`flex items-center justify-end gap-1 text-[8px] font-black uppercase mt-1 ${isOwn ? "text-black/70" : "text-white/40"}`}>
                             <span>{new Date(m.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                             {isOwn && (
-                              <span>{m.seen ? "✓✓" : "✓"}</span>
+                              <span>{m.failed ? "⚠️ Failed" : m.isOptimistic ? "🕒" : m.seen ? "✓✓" : "✓"}</span>
                             )}
                           </div>
                         </div>
@@ -779,5 +821,13 @@ export default function PlayerMessages() {
         </div>
       )}
     </DashboardLayout>
+  );
+}
+
+export default function PlayerMessages() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black text-white flex items-center justify-center">Loading Messages inbox...</div>}>
+      <PlayerMessagesContent />
+    </Suspense>
   );
 }

@@ -64,7 +64,13 @@ export default function CoachSettings() {
 
       const res = await api.put("/dashboard/profile", payload);
       setSuccess(true);
-      localStorage.setItem("profile", JSON.stringify(res.profile));
+      if (res && (res.profile || res)) {
+        const updated = res.profile || res;
+        localStorage.setItem("profile", JSON.stringify(updated));
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("profile-updated"));
+        }
+      }
     } catch (err) {
       setError(err.message || "Failed to save settings.");
     } finally {

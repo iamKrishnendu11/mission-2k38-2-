@@ -24,6 +24,13 @@ async function auth(req, res, next) {
     }
 
     req.user = user;
+    const uid = (user._id || user.id || userId).toString();
+    req.userId = uid;
+    if (req.user) {
+      req.user.userId = uid;
+      req.user._id = uid;
+      req.user.id = uid;
+    }
 
     if (typeof next === 'function') {
       return next();

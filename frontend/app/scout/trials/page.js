@@ -192,6 +192,28 @@ export default function ScoutTrials() {
       });
       setScoreSuccessMsg(`Trial Evaluation Saved! Score: ${res.scoutScore}/99.`);
       
+      // Optimistic update so UI instantly disables rate button
+      setTrials(prev => prev.map(tr => {
+        if (tr._id === trialId || tr.id === trialId) {
+          return {
+            ...tr,
+            applicants: (tr.applicants || []).map(applicant => {
+              const pId = applicant.player?._id || applicant.player?.id || applicant.player;
+              if (String(pId) === String(ratingModal.rawPId)) {
+                return {
+                  ...applicant,
+                  isRated: true,
+                  scoutScore: res.scoutScore,
+                  ratingData: res
+                };
+              }
+              return applicant;
+            })
+          };
+        }
+        return tr;
+      }));
+
       setTimeout(() => {
         setRatingModal(null);
         setScoreSuccessMsg(null);
@@ -782,10 +804,13 @@ export default function ScoutTrials() {
                                       </span>
                                       {app.isRated ? (
                                         <button
-                                          onClick={() => openTrialRatingModal(t, app, rawPId)}
-                                          className="px-3 py-1 rounded-lg bg-green-500 text-black font-black uppercase text-[10px] tracking-wider transition-all flex items-center gap-1 shadow hover:bg-green-400"
+                                          type="button"
+                                          disabled
+                                          aria-disabled="true"
+                                          className="px-3 py-1 rounded-lg bg-zinc-900 border border-green-500/40 text-green-400 font-black uppercase text-[10px] tracking-wider flex items-center gap-1.5 opacity-90 cursor-not-allowed select-none shadow-[inset_0_0_8px_rgba(34,197,94,0.15)]"
+                                          title="Evaluation complete: Player has already been rated for this trial"
                                         >
-                                          <CheckCircle2 className="w-3 h-3 text-black" />
+                                          <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
                                           <span>RATED ({app.scoutScore || 0}/99)</span>
                                         </button>
                                       ) : (

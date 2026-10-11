@@ -17,6 +17,6 @@
     "start:ai": "cd ai_backend/api_service && uvicorn api:app --port 8000"
   },
   "dependencies": {
-    "concurrently": "^10.0.3"
+    "concurrently": "^10.0.6"
   }
 }

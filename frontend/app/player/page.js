@@ -262,7 +262,7 @@ export default function PlayerDashboard() {
                   <p className="text-[14px] text-white/60 mb-6 flex items-center justify-center md:justify-start gap-2.5 font-medium">
                     <span className="text-white font-semibold px-2 py-0.5 bg-white/10 rounded-md text-[11px] uppercase tracking-wider">{profile?.preferredPosition || 'CAM'}</span>
                     <span className="opacity-30">•</span>
-                    <span>{profile?.currentClub || 'Free Agent'}</span>
+                    <span>{profile?.currentClub || profile?.organization || profile?.agency || 'Free Agent'}</span>
                   </p>
                   
                   <div className="grid grid-cols-3 gap-4 border border-white/[0.06] bg-white/[0.02] rounded-xl p-5 shadow-inner mt-2">
@@ -271,8 +271,10 @@ export default function PlayerDashboard() {
                       <span className="text-3xl font-bold bg-gradient-to-br from-white to-white/50 bg-clip-text text-transparent leading-none">{rankInfo?.myData ? rankInfo.myData.overallScore : (profile?.skills?.overallScore || 0)}</span>
                     </div>
                     <div className="flex flex-col items-center md:items-start border-r border-white/5 pl-5">
-                      <span className="text-sm text-white/50 font-medium mb-1">AI Rating</span>
-                      <span className="text-3xl font-bold bg-gradient-to-br from-white to-white/50 bg-clip-text text-transparent leading-none">{profile?.skills?.aiScore || 0}</span>
+                      <span className="text-sm text-white/50 font-medium mb-1">No of Reports</span>
+                      <span className="text-3xl font-bold bg-gradient-to-br from-white to-white/50 bg-clip-text text-transparent leading-none">
+                        {profile?.skills?.reportsCount ?? profile?.skills?.scoutReportsCount ?? profile?.skills?.scoutRatingsCount ?? 0}
+                      </span>
                     </div>
                     <div className="flex flex-col items-center md:items-start pl-5">
                       <span className="text-sm text-white/50 font-medium mb-1">Global Rank</span>
@@ -311,23 +313,24 @@ export default function PlayerDashboard() {
               {trials && trials.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-5">
                   {trials.map((trial, index) => {
+                    const isCompleted = trial.isCompleted || trial.isRated || trial.myStatus === "completed" || (trial.scoutScore !== undefined && trial.scoutScore !== null) || (trial.myStatus === "accepted" && new Date(trial.date) < new Date());
                     const isAccepted = trial.myStatus === "accepted";
                     const isRegistered = trial.isRegistered;
                     const colors = ['yellow', 'green', 'blue', 'orange', 'red'];
                     
                     const cardData = {
                       id: trial._id,
-                      colorClass: colors[index % colors.length],
+                      colorClass: isCompleted ? 'green' : colors[index % colors.length],
                       date: new Date(trial.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
                       title: trial.title || "Elite Trial",
                       description: trial.location,
-                      progressPercent: isAccepted ? '100%' : isRegistered ? '50%' : '0%',
-                      progressValue: isAccepted ? 'Confirmed' : isRegistered ? 'Pending' : 'Not Applied',
+                      progressPercent: (isCompleted || isAccepted) ? '100%' : isRegistered ? '50%' : '0%',
+                      progressValue: isCompleted ? 'Completed' : isAccepted ? 'Confirmed' : isRegistered ? 'Pending' : 'Not Applied',
                       imgSrc1: 'https://cdn.21st.dev/assets/mirror/7f/7fd6c9c03ca80e37fe8b9d2c0a7bbcb0cfc0efb7ddfee804eae550721823b005.jpg',
                       imgAlt1: 'User 1',
                       imgSrc2: 'https://cdn.21st.dev/assets/mirror/fa/fa7717cc596a4e9f046857063a32bf2b02e92641715dee729e2193845a3c96c3.jpg',
                       imgAlt2: 'User 2',
-                      countdownText: trial.time,
+                      countdownText: isCompleted ? (trial.scoutScore ? `Score: ${trial.scoutScore}/99` : 'Completed') : trial.time,
                     };
                     
                     return <CourseCard key={trial._id} data={cardData} />;
