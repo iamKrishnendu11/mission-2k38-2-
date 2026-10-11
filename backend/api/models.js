@@ -41,9 +41,10 @@ function rowToDoc(row, tableName, ModelClass) {
   if (row.trial_id) docData.trial = row.trial_id;
   if (row.type) docData.type = row.type;
   if (row.message) docData.message = row.message;
+  if (row.read !== undefined) docData.read = row.read;
 
   if (ModelClass) {
-    return new ModelClass(docData);
+    return new ModelClass(docData, false);
   }
 
   return docData;
@@ -135,24 +136,56 @@ function matchesFilter(doc, filter) {
     if (val !== undefined && val !== null) {
       if (typeof val === 'object' && !Array.isArray(val)) {
         if (val.$in && Array.isArray(val.$in)) {
-          const valStrList = val.$in.map(v => String(v._id || v.id || v));
+          const valStrList = val.$in.map(v => String(v._id || v.id || v).toLowerCase());
           if (Array.isArray(docVal)) {
-            const hasMatch = docVal.some(item => valStrList.includes(String(item._id || item.id || item)));
+            const hasMatch = docVal.some(item => valStrList.includes(String(item._id || item.id || item).toLowerCase()));
             if (!hasMatch) return false;
           } else {
-            const docStr = String(docVal?._id || docVal?.id || docVal);
+            const docStr = String(docVal?._id || docVal?.id || docVal).toLowerCase();
             if (!valStrList.includes(docStr)) return false;
           }
+        } else if (val.$all && Array.isArray(val.$all)) {
+          if (!Array.isArray(docVal)) return false;
+          const docStrList = docVal.map(item => String(item?.player || item?.user || item?._id || item?.id || item).toLowerCase());
+          const allMatch = val.$all.every(v => {
+            const targetStr = String(v?._id || v?.id || v).toLowerCase();
+            return docStrList.includes(targetStr);
+          });
+          if (!allMatch) return false;
+        } else if (val.$nin && Array.isArray(val.$nin)) {
+          const valStrList = val.$nin.map(v => String(v._id || v.id || v).toLowerCase());
+          if (Array.isArray(docVal)) {
+            const hasMatch = docVal.some(item => valStrList.includes(String(item._id || item.id || item).toLowerCase()));
+            if (hasMatch) return false;
+          } else {
+            const docStr = String(docVal?._id || docVal?.id || docVal).toLowerCase();
+            if (valStrList.includes(docStr)) return false;
+          }
         } else if (val.$ne !== undefined) {
-          const docStr = String(docVal?._id || docVal?.id || docVal);
-          const neStr = String(val.$ne._id || val.$ne.id || val.$ne);
-          if (docStr === neStr) return false;
-        } else if (val.$gte !== undefined || val.$lte !== undefined) {
+          if (val.$ne === null) {
+            if (docVal === null || docVal === undefined || docVal === '') return false;
+          } else {
+            const docStr = String(docVal?._id || docVal?.id || docVal);
+            const neVal = typeof val.$ne === 'object' && val.$ne !== null ? (val.$ne._id || val.$ne.id || val.$ne) : val.$ne;
+            const neStr = String(neVal);
+            if (docStr.toLowerCase() === neStr.toLowerCase()) return false;
+          }
+        } else if (val.$gte !== undefined || val.$lte !== undefined || val.$gt !== undefined || val.$lt !== undefined) {
           const numDoc = Number(docVal) || 0;
+          if (val.$gt !== undefined && numDoc <= Number(val.$gt)) return false;
           if (val.$gte !== undefined && numDoc < Number(val.$gte)) return false;
+          if (val.$lt !== undefined && numDoc >= Number(val.$lt)) return false;
           if (val.$lte !== undefined && numDoc > Number(val.$lte)) return false;
+        } else if (val.$regex !== undefined) {
+          const reg = new RegExp(val.$regex, val.$options || '');
+          if (!reg.test(String(docVal || ''))) return false;
         } else if (val instanceof RegExp) {
           if (!val.test(String(docVal || ''))) return false;
+        } else {
+          // Object fallback comparison (e.g. { _id: '...' } or ObjectId)
+          const targetStr = String(val._id || val.id || val);
+          const docStr = String(docVal?._id || docVal?.id || docVal);
+          if (docStr.toLowerCase() !== targetStr.toLowerCase()) return false;
         }
       } else if (Array.isArray(docVal)) {
         const targetStr = String(val._id || val.id || val);
@@ -206,7 +239,11 @@ class PostgresQueryBuilder {
   }
 
   populate(path, selectFields) {
-    this.populateOptions.push({ path, selectFields });
+    if (typeof path === 'object' && path !== null) {
+      this.populateOptions.push({ path: path.path, selectFields: path.select });
+    } else {
+      this.populateOptions.push({ path, selectFields });
+    }
     return this;
   }
 
@@ -229,7 +266,7 @@ class PostgresQueryBuilder {
 
 // Execute query for PostgresQueryBuilder
 async function executeQuery(qb) {
-  const { tableName, filter, sortOption, limitOption, skipOption, populateOptions, ModelClass } = qb;
+  const { tableName, filter, sortOption, limitOption, skipOption, populateOptions, selectOptions, ModelClass } = qb;
   let sql = `SELECT * FROM ${tableName} WHERE 1=1`;
   const params = [];
 
@@ -247,6 +284,21 @@ async function executeQuery(qb) {
     } else if (filter.user && typeof filter.user === 'string') {
       params.push(filter.user);
       sql += ` AND (user_id = $${params.length} OR data->>'user' = $${params.length})`;
+    } else if (filter.chat && typeof filter.chat === 'string') {
+      params.push(filter.chat);
+      sql += ` AND (chat_id = $${params.length} OR data->>'chat' = $${params.length})`;
+    } else if (filter.sender && typeof filter.sender === 'string') {
+      params.push(filter.sender);
+      sql += ` AND (sender_id = $${params.length} OR data->>'sender' = $${params.length})`;
+    } else if (filter.post && typeof filter.post === 'string') {
+      params.push(filter.post);
+      sql += ` AND (post_id = $${params.length} OR data->>'post' = $${params.length})`;
+    } else if (filter.trial && typeof filter.trial === 'string') {
+      params.push(filter.trial);
+      sql += ` AND (trial_id = $${params.length} OR data->>'trial' = $${params.length})`;
+    } else if (filter.tournament && typeof filter.tournament === 'string') {
+      params.push(filter.tournament);
+      sql += ` AND (tournament_id = $${params.length} OR data->>'tournament' = $${params.length})`;
     }
   }
 
@@ -286,22 +338,102 @@ async function executeQuery(qb) {
   // Populate references if requested
   if (populateOptions && populateOptions.length && docs.length) {
     for (const pop of populateOptions) {
-      const field = pop.path;
+      const fieldPath = typeof pop.path === 'object' && pop.path !== null ? pop.path.path : pop.path;
+      if (!fieldPath) continue;
+
       for (const doc of docs) {
-        if (doc[field]) {
-          const refId = typeof doc[field] === 'object' ? doc[field]._id || doc[field].id : doc[field];
-          if (typeof refId === 'string' && refId.length === 24) {
-            const userRes = await query(`SELECT * FROM users WHERE id = $1`, [refId]);
-            if (userRes.rows.length) {
-              doc[field] = rowToDoc(userRes.rows[0], 'users');
-            } else {
-              const profRes = await query(`SELECT * FROM profiles WHERE id = $1`, [refId]);
-              if (profRes.rows.length) {
-                doc[field] = rowToDoc(profRes.rows[0], 'profiles');
+        // Dot-notation paths like 'applicants.player'
+        if (fieldPath.includes('.')) {
+          const parts = fieldPath.split('.');
+          const parentField = parts[0];
+          const childField = parts[1];
+          if (Array.isArray(doc[parentField])) {
+            for (const item of doc[parentField]) {
+              if (item && item[childField]) {
+                const refId = typeof item[childField] === 'object' ? (item[childField]._id || item[childField].id) : item[childField];
+                if (typeof refId === 'string' && refId.length === 24) {
+                  const userRes = await query(`SELECT * FROM users WHERE id = $1`, [refId]);
+                  if (userRes.rows.length) {
+                    item[childField] = rowToDoc(userRes.rows[0], 'users');
+                  } else {
+                    const profRes = await query(`SELECT * FROM profiles WHERE id = $1`, [refId]);
+                    if (profRes.rows.length) {
+                      item[childField] = rowToDoc(profRes.rows[0], 'profiles');
+                    }
+                  }
+                }
+              }
+            }
+          }
+          continue;
+        }
+
+        // Direct field
+        if (doc[fieldPath]) {
+          if (Array.isArray(doc[fieldPath])) {
+            const populatedArr = [];
+            for (const item of doc[fieldPath]) {
+              const refId = typeof item === 'object' ? (item._id || item.id) : item;
+              if (typeof refId === 'string' && refId.length === 24) {
+                const userRes = await query(`SELECT * FROM users WHERE id = $1`, [refId]);
+                if (userRes.rows.length) {
+                  populatedArr.push(rowToDoc(userRes.rows[0], 'users'));
+                  continue;
+                }
+                const profRes = await query(`SELECT * FROM profiles WHERE id = $1`, [refId]);
+                if (profRes.rows.length) {
+                  populatedArr.push(rowToDoc(profRes.rows[0], 'profiles'));
+                  continue;
+                }
+              }
+              populatedArr.push(item);
+            }
+            doc[fieldPath] = populatedArr;
+          } else {
+            const refId = typeof doc[fieldPath] === 'object' ? (doc[fieldPath]._id || doc[fieldPath].id) : doc[fieldPath];
+            if (typeof refId === 'string' && refId.length === 24) {
+              const userRes = await query(`SELECT * FROM users WHERE id = $1`, [refId]);
+              if (userRes.rows.length) {
+                doc[fieldPath] = rowToDoc(userRes.rows[0], 'users');
+              } else {
+                const profRes = await query(`SELECT * FROM profiles WHERE id = $1`, [refId]);
+                if (profRes.rows.length) {
+                  doc[fieldPath] = rowToDoc(profRes.rows[0], 'profiles');
+                } else {
+                  const trialRes = await query(`SELECT * FROM trials WHERE id = $1`, [refId]);
+                  if (trialRes.rows.length) {
+                    doc[fieldPath] = rowToDoc(trialRes.rows[0], 'trials');
+                  }
+                }
               }
             }
           }
         }
+      }
+    }
+  }
+
+  // Apply select projection if specified
+  if (selectOptions && docs.length) {
+    if (typeof selectOptions === 'string') {
+      const parts = selectOptions.trim().split(/\s+/).filter(Boolean);
+      const isExclusion = parts.length > 0 && parts.every(p => p.startsWith('-'));
+      if (isExclusion) {
+        const excludeFields = parts.map(p => p.slice(1));
+        docs.forEach(doc => {
+          excludeFields.forEach(f => {
+            delete doc[f];
+          });
+        });
+      } else if (parts.length > 0) {
+        const includeFields = new Set(parts.filter(p => !p.startsWith('-')).concat(['_id', 'id']));
+        docs = docs.map(doc => {
+          const projected = {};
+          includeFields.forEach(f => {
+            if (doc[f] !== undefined) projected[f] = doc[f];
+          });
+          return projected;
+        });
       }
     }
   }
@@ -311,30 +443,38 @@ async function executeQuery(qb) {
 
 // Base Factory to create Mongoose-compatible Model Constructor Class
 function createModelClass(tableName) {
-  function Model(dataObj = {}) {
+  function Model(dataObj = {}, isNew = true) {
     Object.assign(this, dataObj);
     if (!this._id && !this.id) {
       this._id = generateObjectId();
       this.id = this._id;
     }
+    this._isNew = dataObj._isNew !== undefined ? dataObj._isNew : isNew;
   }
 
   Model.prototype.save = async function () {
-    const existing = await Model.findById(this._id);
-    if (existing) {
-      const updated = await updateDocument(tableName, this._id, this);
+    if (this._isNew) {
+      const created = await Model.create(this);
+      Object.assign(this, created);
+      this._isNew = false;
+      return this;
+    }
+    const updated = await updateDocument(tableName, this._id, this);
+    if (updated) {
       Object.assign(this, updated);
+      this._isNew = false;
       return this;
     }
     const created = await Model.create(this);
     Object.assign(this, created);
+    this._isNew = false;
     return this;
   };
 
   Model.prototype.toObject = function () { return { ...this }; };
   Model.prototype.toJSON = function () { return { ...this }; };
 
-  Model.create = async function (dataObj) {
+  Model._createSingle = async function (dataObj) {
     const id = dataObj._id || dataObj.id || generateObjectId();
     const now = new Date();
     const data = { ...dataObj, createdAt: now, updatedAt: now };
@@ -362,12 +502,16 @@ function createModelClass(tableName) {
       player: 'player_id',
       trial: 'trial_id',
       type: 'type',
-      message: 'message'
+      message: 'message',
+      read: 'read'
     };
 
     for (const [field, col] of Object.entries(fieldToColumnMap)) {
       if (dataObj[field] !== undefined && dataObj[field] !== null) {
-        const val = field === 'email' ? dataObj[field].toLowerCase() : dataObj[field];
+        let val = field === 'email' ? dataObj[field].toLowerCase() : dataObj[field];
+        if (val && typeof val === 'object' && (val._id || val.id)) {
+          val = val._id || val.id;
+        }
         cols.push(col);
         vals.push(val);
         placeholders.push(`$${vals.length}`);
@@ -395,6 +539,31 @@ function createModelClass(tableName) {
     }
   };
 
+  Model.create = async function (...args) {
+    if (args.length === 0) return null;
+    if (Array.isArray(args[0])) {
+      return await Model.insertMany(args[0]);
+    }
+    if (args.length > 1) {
+      return await Model.insertMany(args);
+    }
+    const dataObj = args[0] || {};
+    return await Model._createSingle(dataObj);
+  };
+
+  Model.insertMany = async function (docs) {
+    if (!docs) return [];
+    const docList = Array.isArray(docs) ? docs : [docs];
+    if (docList.length === 0) return [];
+
+    const createdDocs = [];
+    for (const docObj of docList) {
+      const created = await Model._createSingle(docObj);
+      createdDocs.push(created);
+    }
+    return createdDocs;
+  };
+
   Model.find = function (filter = {}) {
     return new PostgresQueryBuilder(tableName, filter, Model);
   };
@@ -410,31 +579,92 @@ function createModelClass(tableName) {
     return qb;
   };
 
-  Model.findById = async function (id) {
-    if (!id) return null;
-    return this.findOne({ _id: id });
-  };
-
-  Model.findByIdAndUpdate = async function (id, updateObj, options = {}) {
-    if (!id) return null;
-    const updates = updateObj.$set ? updateObj.$set : updateObj;
-    try {
-      return await updateDocument(tableName, id, updates);
-    } catch (err) {
-      return null;
+  Model.findById = function (id) {
+    if (!id) {
+      const qb = new PostgresQueryBuilder(tableName, { _id: '__non_existent_id__' }, Model);
+      qb.limit(1);
+      qb.exec = async () => null;
+      return qb;
     }
+    const cleanId = typeof id === 'object' ? (id._id || id.id || String(id)) : String(id);
+    return this.findOne({ _id: cleanId });
   };
 
-  Model.findOneAndUpdate = async function (filter, updateObj, options = {}) {
-    const doc = await this.findOne(filter);
-    if (!doc) {
-      if (options.upsert) {
-        const cleanData = { ...filter, ...(updateObj.$set || updateObj) };
-        return await this.create(cleanData);
+  Model.findByIdAndUpdate = function (id, updateObj, options = {}) {
+    const qb = {
+      populateOptions: [],
+      populate(path, selectFields) {
+        if (typeof path === 'object' && path !== null) {
+          this.populateOptions.push({ path: path.path, selectFields: path.select });
+        } else {
+          this.populateOptions.push({ path, selectFields });
+        }
+        return this;
+      },
+      select(sel) { return this; },
+      lean() { return this; },
+      async exec() {
+        if (!id) return null;
+        const cleanId = typeof id === 'object' ? (id._id || id.id || String(id)) : String(id);
+        const updates = updateObj && updateObj.$set ? updateObj.$set : updateObj;
+        try {
+          const doc = await updateDocument(tableName, cleanId, updates);
+          if (!doc) return null;
+          if (this.populateOptions.length) {
+            const fakeQb = new PostgresQueryBuilder(tableName, { _id: cleanId }, Model);
+            fakeQb.populateOptions = this.populateOptions;
+            fakeQb.limit(1);
+            const populated = await executeQuery(fakeQb);
+            return populated[0] || doc;
+          }
+          return doc;
+        } catch (err) {
+          return null;
+        }
+      },
+      then(resolve, reject) {
+        return this.exec().then(resolve, reject);
+      },
+      catch(reject) {
+        return this.exec().catch(reject);
       }
-      return null;
-    }
-    return await this.findByIdAndUpdate(doc._id, updateObj, options);
+    };
+    return qb;
+  };
+
+  Model.findOneAndUpdate = function (filter, updateObj, options = {}) {
+    const qb = {
+      populateOptions: [],
+      populate(path, selectFields) {
+        if (typeof path === 'object' && path !== null) {
+          this.populateOptions.push({ path: path.path, selectFields: path.select });
+        } else {
+          this.populateOptions.push({ path, selectFields });
+        }
+        return this;
+      },
+      select(sel) { return this; },
+      lean() { return this; },
+      async exec() {
+        const doc = await Model.findOne(filter);
+        if (!doc) {
+          if (options && options.upsert) {
+            const cleanData = { ...filter, ...(updateObj.$set || updateObj) };
+            return await Model.create(cleanData);
+          }
+          return null;
+        }
+        const updated = await Model.findByIdAndUpdate(doc._id, updateObj, options);
+        return updated;
+      },
+      then(resolve, reject) {
+        return this.exec().then(resolve, reject);
+      },
+      catch(reject) {
+        return this.exec().catch(reject);
+      }
+    };
+    return qb;
   };
 
   Model.updateOne = async function (filter, updateObj) {
@@ -465,9 +695,10 @@ function createModelClass(tableName) {
 
   Model.findByIdAndDelete = async function (id) {
     if (!id) return null;
-    const doc = await this.findById(id);
+    const cleanId = typeof id === 'object' ? (id._id || id.id || String(id)) : String(id);
+    const doc = await this.findById(cleanId);
     if (doc) {
-      await query(`DELETE FROM ${tableName} WHERE id = $1`, [id]);
+      await query(`DELETE FROM ${tableName} WHERE id = $1`, [cleanId]);
     }
     return doc;
   };

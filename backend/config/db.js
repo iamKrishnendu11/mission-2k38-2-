@@ -12,8 +12,12 @@ const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
   max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000
+  idleTimeoutMillis: 60000,
+  connectionTimeoutMillis: 30000
+});
+
+pool.on('error', (err) => {
+  console.warn('[Postgres Pool Warning - Handled]:', err.message);
 });
 
 async function query(text, params) {

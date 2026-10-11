@@ -120,9 +120,14 @@ async function formatProfileSkills(profile) {
   if (!profile) return profile;
   const pObj = profile.toObject ? profile.toObject() : profile;
   if (pObj.user && (pObj.user.role === 'player' || !pObj.user.role)) {
-    const ratingsCount = await ScoutRating.countDocuments({ player: pObj.user._id || pObj.user });
+    const pUserId = pObj.user._id || pObj.user;
+    const ratingsCount = await ScoutRating.countDocuments({ player: pUserId });
+    const reportsCount = await ScoutReport.countDocuments({ player: pUserId });
+    const totalReports = Math.max(ratingsCount, reportsCount);
     pObj.skills = pObj.skills || {};
     pObj.skills.scoutRatingsCount = ratingsCount;
+    pObj.skills.scoutReportsCount = totalReports;
+    pObj.skills.reportsCount = totalReports;
 
     if (ratingsCount === 0) {
       pObj.skills.scoutScore = 0;
@@ -228,8 +233,9 @@ router.put('/profile', authenticateToken, async (req, res) => {
 
     await profile.save();
     const updatedProfile = await Profile.findById(profile._id).populate('user', 'email role');
+    const formattedProfile = await formatProfileSkills(updatedProfile);
 
-    res.json({ message: 'Profile updated successfully!', profile: updatedProfile });
+    res.json({ message: 'Profile updated successfully!', profile: formattedProfile });
   } catch (err) {
     console.error('Profile update error:', err);
     res.status(500).json({ error: err.message });
@@ -382,12 +388,37 @@ router.get('/player/dashboard', authenticateToken, async (req, res) => {
       if (uId) scoutProfileMap[uId] = sp;
     });
 
-    // Format trials with player's application status & scout name
+    // Fetch all ratings for this player (trials & direct)
+    const playerRatings = await ScoutRating.find({ player: userId });
+    const trialRatingMap = {};
+    playerRatings.forEach(r => {
+      const tId = r.trial?._id?.toString() || r.trial?.id?.toString() || r.trial?.toString();
+      if (tId) {
+        trialRatingMap[tId] = r;
+      }
+    });
+
+    // Format trials with player's application status, completion status, score & scout name
     const formattedTrials = activeTrials.map(t => {
       const tObj = typeof t.toObject === 'function' ? t.toObject() : t;
+      const trialIdStr = tObj._id?.toString() || tObj.id?.toString();
       const myApp = (tObj.applicants || []).find(a => isPlayerMatch(a.player, userId));
       tObj.isRegistered = !!myApp;
-      tObj.myStatus = myApp ? myApp.status : null;
+
+      const myRating = trialRatingMap[trialIdStr];
+      const isPastDate = tObj.date ? new Date(tObj.date) < new Date() : false;
+      const isTrialCompleted = tObj.status === 'completed' || !!myRating || (isPastDate && myApp?.status === 'accepted');
+
+      tObj.isCompleted = isTrialCompleted;
+      tObj.isRated = !!myRating;
+      tObj.scoutScore = myRating ? myRating.scoutScore : null;
+      tObj.ratingData = myRating || null;
+
+      if (isTrialCompleted && myApp?.status === 'accepted') {
+        tObj.myStatus = 'completed';
+      } else {
+        tObj.myStatus = myApp ? myApp.status : null;
+      }
 
       const sId = t.scout?._id?.toString() || t.scout?.toString();
       const sProfile = scoutProfileMap[sId];
@@ -406,9 +437,10 @@ router.get('/player/dashboard', authenticateToken, async (req, res) => {
     });
 
     const tournaments = await Tournament.find({ status: 'upcoming' }).limit(5);
+    const formattedProfile = await formatProfileSkills(profile);
 
     res.json({
-      profile,
+      profile: formattedProfile,
       videos,
       analyses,
       trials: formattedTrials,
@@ -825,6 +857,96 @@ router.get('/scout/rate/:playerId', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// GET ALL SUBMITTED SCOUT RATINGS (PREVIOUS RATINGS)
+router.get('/scout/ratings', authenticateToken, async (req, res) => {
+  try {
+    const scoutUserId = req.user.userId || req.user.id || req.userId;
+    const ratings = await ScoutRating.find({ scout: scoutUserId }).sort({ updatedAt: -1, createdAt: -1 });
+
+    // Fetch player profiles
+    const playerUserIds = Array.from(new Set(ratings.map(r => r.player?.toString()).filter(Boolean)));
+    const playerProfiles = await Profile.find({ user: { $in: playerUserIds } });
+    const profileMap = {};
+    playerProfiles.forEach(p => { 
+      if (p.user) profileMap[p.user.toString()] = p; 
+      profileMap[p._id.toString()] = p;
+    });
+
+    // Fetch trials
+    const trialIds = Array.from(new Set(ratings.map(r => r.trial?.toString()).filter(Boolean)));
+    const trials = await Trial.find({ _id: { $in: trialIds } });
+    const trialMap = {};
+    trials.forEach(t => { 
+      const tId = t._id?.toString() || t.id?.toString();
+      if (tId) trialMap[tId] = t; 
+    });
+
+    const enriched = ratings.map(r => {
+      const rObj = typeof r.toObject === 'function' ? r.toObject() : { ...r };
+      const pIdStr = r.player?.toString();
+      const pProfile = profileMap[pIdStr];
+      const trialDoc = r.trial ? trialMap[r.trial?.toString()] : null;
+
+      return {
+        ...rObj,
+        player: {
+          _id: r.player,
+          profileId: pProfile?._id,
+          name: pProfile?.name || 'Prospect Player',
+          profilePhoto: pProfile?.profilePhoto || '',
+          preferredPosition: pProfile?.preferredPosition || 'ST',
+          ageCategory: pProfile?.ageCategory || 'Senior',
+          club: pProfile?.club || 'Free Agent',
+          country: pProfile?.country || 'India',
+          city: pProfile?.city || '',
+          state: pProfile?.state || '',
+          height: pProfile?.height,
+          weight: pProfile?.weight,
+          skills: pProfile?.skills || {}
+        },
+        trial: trialDoc ? {
+          _id: trialDoc._id,
+          title: trialDoc.title,
+          location: trialDoc.location,
+          date: trialDoc.date,
+          time: trialDoc.time,
+          positionsTarget: trialDoc.positionsTarget
+        } : null
+      };
+    });
+
+    res.json(enriched);
+  } catch (err) {
+    console.error('Error fetching scout ratings:', err);
+    res.status(500).json({ error: 'Failed to fetch scout ratings.' });
+  }
+});
+
+// DELETE A SCOUT RATING (PREVIOUS RATING REMOVAL)
+router.delete('/scout/ratings/:id', authenticateToken, async (req, res) => {
+  try {
+    const scoutUserId = req.user.userId || req.user.id || req.userId;
+    const ratingId = req.params.id;
+
+    const ratingDoc = await ScoutRating.findOne({ _id: ratingId, scout: scoutUserId });
+    if (!ratingDoc) {
+      return res.status(404).json({ error: 'Rating not found or unauthorized.' });
+    }
+
+    const playerId = ratingDoc.player;
+    await ScoutRating.deleteOne({ _id: ratingId });
+
+    // Recalculate player ratings without this scout's rating
+    await recalculatePlayerRatings(playerId);
+
+    res.json({ message: 'Rating removed successfully.' });
+  } catch (err) {
+    console.error('Error deleting scout rating:', err);
+    res.status(500).json({ error: 'Failed to delete rating.' });
+  }
+});
+
 
 // 7. SCOUT SAVE PLAYER
 router.post('/scout/save', authenticateToken, async (req, res) => {

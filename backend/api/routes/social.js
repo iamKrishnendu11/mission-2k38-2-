@@ -11,9 +11,15 @@ const authenticateToken = (req, res, next) => {
 
   const JWT_SECRET = process.env.JWT_SECRET || 'mission2k38_jwt_secret_key_998877_super_secure';
   require('jsonwebtoken').verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid or expired token.' });
+    if (err) return res.status(401).json({ error: 'Invalid or expired token.' });
     req.user = user;
-    req.userId = user?.userId || user?.id;
+    const uid = (user?.userId || user?.id || user?._id)?.toString();
+    req.userId = uid;
+    if (req.user) {
+      req.user.userId = uid;
+      req.user._id = uid;
+      req.user.id = uid;
+    }
     next();
   });
 };
@@ -204,19 +210,20 @@ router.post('/users/:id/follow', authenticateToken, async (req, res) => {
 // 7. GET CHATS HISTORY
 router.get('/chats', authenticateToken, async (req, res) => {
   try {
+    const currentUserId = (req.user?.userId || req.user?._id || req.user?.id || req.userId)?.toString();
     const chats = await Chat.find({
-      participants: req.user.userId
+      participants: currentUserId
     }).sort({ lastMessageAt: -1 });
 
     const populatedChats = [];
     for (let chat of chats) {
-      const otherParticipantId = chat.participants.find(p => p.toString() !== req.user.userId);
-      const otherUser = await User.findById(otherParticipantId).select('email role');
-      const otherProfile = await Profile.findOne({ user: otherParticipantId });
+      const otherParticipantId = (chat.participants || []).map(p => (p?._id || p?.id || p)?.toString()).find(p => p !== currentUserId);
+      const otherUser = otherParticipantId ? await User.findById(otherParticipantId).select('email role') : null;
+      const otherProfile = otherParticipantId ? await Profile.findOne({ user: otherParticipantId }) : null;
       
       const unreadCount = await Message.countDocuments({
         chat: chat._id,
-        sender: { $ne: req.user.userId },
+        sender: { $ne: currentUserId },
         seen: { $ne: true }
       });
 
@@ -236,19 +243,48 @@ router.get('/chats', authenticateToken, async (req, res) => {
   }
 });
 
+// GET UNREAD CHATS COUNT
+router.get('/chats/unread-count', authenticateToken, async (req, res) => {
+  try {
+    const currentUserId = (req.user?.userId || req.user?._id || req.user?.id || req.userId)?.toString();
+    const chats = await Chat.find({ participants: currentUserId });
+    if (!chats.length) {
+      return res.json({ unreadCount: 0 });
+    }
+    const chatIds = chats.map(c => c._id);
+    const count = await Message.countDocuments({
+      chat: { $in: chatIds },
+      sender: { $ne: currentUserId },
+      seen: { $ne: true }
+    });
+    res.json({ unreadCount: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 8. START CHAT WITH USER
 router.post('/chats/start', authenticateToken, async (req, res) => {
   try {
-    const { targetUserId } = req.body;
+    const currentUserId = (req.user?.userId || req.user?._id || req.user?.id || req.userId)?.toString();
+    const targetUserId = req.body.targetUserId ? String(req.body.targetUserId._id || req.body.targetUserId.id || req.body.targetUserId) : null;
+
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'Target user ID is required.' });
+    }
+
+    if (currentUserId === targetUserId) {
+      return res.status(400).json({ error: 'Cannot start chat with yourself.' });
+    }
 
     // Check if chat already exists
     let chat = await Chat.findOne({
-      participants: { $all: [req.user.userId, targetUserId] }
+      participants: { $all: [currentUserId, targetUserId] }
     });
 
     if (!chat) {
       chat = new Chat({
-        participants: [req.user.userId, targetUserId],
+        participants: [currentUserId, targetUserId],
         lastMessage: 'Chat initialized.',
         lastMessageAt: new Date()
       });
@@ -264,9 +300,11 @@ router.post('/chats/start', authenticateToken, async (req, res) => {
 // 9. GET MESSAGES IN CHAT
 router.get('/chats/:chatId/messages', authenticateToken, async (req, res) => {
   try {
+    const currentUserId = (req.user?.userId || req.user?._id || req.user?.id || req.userId)?.toString();
+
     const chat = await Chat.findOne({
       _id: req.params.chatId,
-      participants: req.user.userId
+      participants: currentUserId
     });
 
     if (!chat) {
@@ -298,6 +336,19 @@ router.post('/notifications/:id/read', authenticateToken, async (req, res) => {
 
     notification.read = true;
     await notification.save();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// MARK ALL NOTIFICATIONS AS READ
+router.post('/notifications/mark-all-read', authenticateToken, async (req, res) => {
+  try {
+    await Notification.updateMany(
+      { user: req.user.userId, read: false },
+      { $set: { read: true } }
+    );
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -428,12 +479,13 @@ router.get('/users/search', authenticateToken, async (req, res) => {
 // 14. SEND MESSAGE VIA POST HTTP (WITH TEXT, IMAGE, OR VIDEO)
 router.post('/chats/:chatId/messages', authenticateToken, async (req, res) => {
   try {
+    const currentUserId = (req.user?.userId || req.user?._id || req.user?.id || req.userId)?.toString();
     const { text = '', mediaUrl, mediaType } = req.body;
     const chatId = req.params.chatId;
 
     const chat = await Chat.findOne({
       _id: chatId,
-      participants: req.user.userId
+      participants: currentUserId
     });
 
     if (!chat) {
@@ -447,7 +499,7 @@ router.post('/chats/:chatId/messages', authenticateToken, async (req, res) => {
 
     const message = new Message({
       chat: chatId,
-      sender: req.user.userId,
+      sender: currentUserId,
       text,
       mediaUrl: mediaUrl || '',
       mediaType: finalMediaType || undefined
@@ -459,29 +511,39 @@ router.post('/chats/:chatId/messages', authenticateToken, async (req, res) => {
     chat.lastMessageAt = new Date();
     await chat.save();
 
-    const receiverId = chat.participants.find(p => p.toString() !== req.user.userId.toString());
-    if (receiverId) {
-      const senderProfile = await Profile.findOne({ user: req.user.userId });
-      const notif = new Notification({
-        user: receiverId,
-        type: 'message',
-        title: `💬 New message from ${senderProfile?.name || 'Someone'}`,
-        message: snippet,
-        data: { chatId: chat._id }
-      });
-      await notif.save();
-
-      const io = req.app.get('io');
-      if (io) {
-        io.to(`chat_${chat._id}`).emit('receive_message', message);
-        io.to(`user_${receiverId.toString()}`).emit('notification:new', notif);
-        io.to(`user_${receiverId.toString()}`).emit('chat_list_update', { chatId: chat._id });
-      }
-    }
-
+    // Respond immediately to client so sending message does not block
     res.status(201).json(message);
+
+    const receiverId = (chat.participants || []).map(p => (p?._id || p?.id || p)?.toString()).find(p => p !== currentUserId);
+    if (receiverId) {
+      // Process notification & socket broadcast asynchronously in background
+      (async () => {
+        try {
+          const senderProfile = await Profile.findOne({ user: currentUserId });
+          const notif = new Notification({
+            user: receiverId,
+            type: 'message',
+            title: `💬 New message from ${senderProfile?.name || 'Someone'}`,
+            message: snippet,
+            data: { chatId: chat._id }
+          });
+          await notif.save();
+
+          const io = req.app.get('io');
+          if (io) {
+            io.to(`chat_${chat._id}`).emit('receive_message', message);
+            io.to(`user_${receiverId.toString()}`).emit('notification:new', notif);
+            io.to(`user_${receiverId.toString()}`).emit('chat_list_update', { chatId: chat._id });
+          }
+        } catch (bErr) {
+          console.error('[Background message notification error]:', bErr.message);
+        }
+      })();
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 

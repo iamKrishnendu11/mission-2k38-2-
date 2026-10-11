@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { api, getSocketUrl } from "@/lib/api";
 import {
   Home, User, Video, TrendingUp, Trophy, Users,
-  MessageSquare, Bell, Settings, LogOut, Search, BookOpen, ShieldAlert, FileText,
+  MessageSquare, Bell, Settings, LogOut, Search, BookOpen, ShieldAlert, FileText, Award,
   Menu, PanelLeft, PanelLeftClose, ChevronDown, ChevronLeft, ChevronRight, Activity, Cpu, Network, Check
 } from "lucide-react";
 import Image from "next/image";
@@ -259,8 +259,9 @@ function Sidebar({
                 {profile?.name || user?.email?.split('@')[0]}
               </div>
               <div className="text-[10px] text-white/50 mt-1" style={{ fontFamily: "Geist Mono, 'SF Mono', monospace", lineHeight: "1.3" }}>
-                <span className="text-yellow-400 font-semibold uppercase">{user?.role}</span> <span className="opacity-50">·</span> {profile?.currentClub || "Free Agent"}
-                <br />
+                <div className="truncate" title={(profile?.organization && String(profile.organization).trim()) || (profile?.agency && String(profile.agency).trim()) || (profile?.clubRepresenting && String(profile.clubRepresenting).trim()) || (profile?.currentClub && String(profile.currentClub).trim()) || (profile?.club && String(profile.club).trim()) || (user?.role === "scout" ? "Independent Scout" : user?.role === "coach" ? "Independent Coach" : user?.role === "admin" ? "Mission 2K38 HQ" : "Free Agent")}>
+                  <span className="text-yellow-400 font-semibold uppercase">{user?.role}</span> <span className="opacity-50">·</span> {(profile?.organization && String(profile.organization).trim()) || (profile?.agency && String(profile.agency).trim()) || (profile?.clubRepresenting && String(profile.clubRepresenting).trim()) || (profile?.currentClub && String(profile.currentClub).trim()) || (profile?.club && String(profile.club).trim()) || (user?.role === "scout" ? "Independent Scout" : user?.role === "coach" ? "Independent Coach" : user?.role === "admin" ? "Mission 2K38 HQ" : "Free Agent")}
+                </div>
                 <span className="text-white/30 text-[9px]">Secured Access</span>
               </div>
             </div>
@@ -275,7 +276,20 @@ function Sidebar({
   );
 }
 
-function Topbar({ onToggleSidebar, sidebarCollapsed }) {
+function Topbar({ onToggleSidebar, sidebarCollapsed, notifications = [], unreadNotifsCount = 0, onMarkAllRead, router }) {
+  const [showDropdown, setShowDropdown] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   return (
     <header
       className="flex items-center justify-between px-3 md:px-6 shrink-0 relative z-50 w-full"
@@ -297,15 +311,86 @@ function Topbar({ onToggleSidebar, sidebarCollapsed }) {
         </button>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 relative" ref={dropdownRef}>
         {/* Network / Status Badges */}
-        <div className="hidden sm:flex items-center gap-1.5 mr-2">
+        <div className="hidden sm:flex items-center gap-1.5 mr-1">
           <div className="relative overflow-hidden flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] text-yellow-400 bg-yellow-400/5 shadow-[inset_0_0_0_1px_rgba(250,204,21,0.2)]">
             <Activity className="w-3 h-3" />
             <span className="font-mono uppercase tracking-wider font-bold">SYSTEM ACTIVE</span>
             <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[70%] h-[1px] bg-gradient-to-r from-transparent via-yellow-400 to-transparent opacity-50" />
           </div>
         </div>
+
+        {/* Notifications Bell */}
+        <button
+          onClick={() => setShowDropdown(prev => !prev)}
+          className="relative w-9 h-9 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center text-white/70 hover:text-white transition-all"
+          title="Notifications"
+        >
+          <Bell className="w-4 h-4" />
+          {unreadNotifsCount > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-yellow-400 text-black text-[9px] font-black flex items-center justify-center shadow-md animate-pulse">
+              {unreadNotifsCount}
+            </span>
+          )}
+        </button>
+
+        {/* Notifications Dropdown */}
+        {showDropdown && (
+          <div className="absolute right-0 top-12 w-80 md:w-96 rounded-2xl bg-[#0c0c0e] border border-white/10 shadow-2xl p-4 z-50 text-left space-y-3 backdrop-blur-xl">
+            <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-white uppercase tracking-wider">Notifications</span>
+                {unreadNotifsCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-md bg-yellow-400/10 text-yellow-400 border border-yellow-400/30 text-[9px] font-bold">
+                    {unreadNotifsCount} new
+                  </span>
+                )}
+              </div>
+              {unreadNotifsCount > 0 && (
+                <button
+                  onClick={onMarkAllRead}
+                  className="text-[10px] text-yellow-400 hover:underline font-bold"
+                >
+                  Mark all read
+                </button>
+              )}
+            </div>
+
+            <div className="max-h-72 overflow-y-auto space-y-2 pr-1" style={{ scrollbarWidth: 'thin' }}>
+              {notifications.length === 0 ? (
+                <div className="py-6 text-center text-xs text-white/40">
+                  No notifications yet.
+                </div>
+              ) : (
+                notifications.map((n) => (
+                  <div
+                    key={n._id}
+                    onClick={() => {
+                      if (n.data?.trialId) router.push('/player/tournaments');
+                      else if (n.data?.reportId) router.push('/scout/reports');
+                      setShowDropdown(false);
+                    }}
+                    className={`p-3 rounded-xl border text-xs transition-colors cursor-pointer ${
+                      n.read 
+                        ? 'bg-white/[0.02] border-white/[0.04] text-white/50 hover:bg-white/[0.04]' 
+                        : 'bg-white/[0.06] border-yellow-400/30 text-white shadow-sm hover:border-yellow-400/50'
+                    }`}
+                  >
+                    <div className="font-bold text-white mb-0.5 flex items-center justify-between">
+                      <span className="truncate">{n.title}</span>
+                      {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 shrink-0 ml-2" />}
+                    </div>
+                    <div className="text-[11px] text-white/60 leading-snug">{n.message}</div>
+                    <div className="text-[9px] text-white/30 mt-1.5">
+                      {n.createdAt ? new Date(n.createdAt).toLocaleDateString() : 'Recent'}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </header>
   );
@@ -318,7 +403,8 @@ export default function DashboardLayout({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [currentProfile, setCurrentProfile] = useState(null);
   const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [unreadNotifsCount, setUnreadNotifsCount] = useState(0);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // Background GSAP Refs
@@ -340,11 +426,20 @@ export default function DashboardLayout({ children }) {
       const rawUserId = parsedUser.id || parsedUser._id || parsedUser.userId || (parsedUser.user ? parsedUser.user.id || parsedUser.user._id : null);
       const cleanUserId = typeof rawUserId === "object" ? (rawUserId._id || rawUserId.id)?.toString() : rawUserId?.toString();
 
+      // Immediately hydrate cached profile to prevent UI flicker
+      const cachedProfileStr = localStorage.getItem("profile");
+      if (cachedProfileStr) {
+        try {
+          const cachedProfile = JSON.parse(cachedProfileStr);
+          if (cachedProfile) setCurrentProfile(cachedProfile);
+        } catch (_) {}
+      }
+
       const syncProfile = () => {
         api.get("/dashboard/profile")
           .then(res => {
             const freshProfile = res?.profile || res;
-            if (freshProfile && (freshProfile.name || freshProfile.profilePhoto)) {
+            if (freshProfile) {
               setCurrentProfile(freshProfile);
               localStorage.setItem("profile", JSON.stringify(freshProfile));
             }
@@ -360,13 +455,33 @@ export default function DashboardLayout({ children }) {
           .then(data => {
             if (Array.isArray(data)) {
               setNotifications(data);
-              setUnreadCount(data.filter(n => !n.read).length);
+              setUnreadNotifsCount(data.filter(n => !n.read).length);
             }
           })
           .catch(err => console.error("Error loading notifications:", err));
       };
 
+      const loadUnreadMessages = () => {
+        api.get("/social/chats/unread-count")
+          .then(res => {
+            setUnreadMessagesCount(Number(res?.unreadCount) || 0);
+          })
+          .catch(() => {
+            api.get("/social/chats")
+              .then(chats => {
+                if (Array.isArray(chats)) {
+                  const total = chats.reduce((acc, c) => acc + (Number(c.unreadCount) || 0), 0);
+                  setUnreadMessagesCount(total);
+                } else {
+                  setUnreadMessagesCount(0);
+                }
+              })
+              .catch(() => setUnreadMessagesCount(0));
+          });
+      };
+
       loadNotifications();
+      loadUnreadMessages();
 
       try {
         socket = ioClient(getSocketUrl(), {
@@ -380,19 +495,31 @@ export default function DashboardLayout({ children }) {
 
         socket.on("notification:new", (newNotif) => {
           setNotifications(prev => [newNotif, ...prev.filter(n => n._id !== newNotif._id)]);
-          setUnreadCount(prev => prev + 1);
+          setUnreadNotifsCount(prev => prev + 1);
+        });
+
+        socket.on("receive_message", () => {
+          loadUnreadMessages();
+        });
+
+        socket.on("chat_list_update", () => {
+          loadUnreadMessages();
         });
       } catch (sErr) {
         console.warn("Socket.io connect notice:", sErr);
       }
 
-      pollInterval = setInterval(loadNotifications, 5000);
-    }
+      pollInterval = setInterval(() => {
+        loadNotifications();
+        loadUnreadMessages();
+      }, 5000);
 
-    return () => {
-      if (socket) socket.disconnect();
-      if (pollInterval) clearInterval(pollInterval);
-    };
+      return () => {
+        if (socket) socket.disconnect();
+        if (pollInterval) clearInterval(pollInterval);
+        window.removeEventListener("profile-updated", syncProfile);
+      };
+    }
   }, [router]);
 
   useEffect(() => {
@@ -402,6 +529,16 @@ export default function DashboardLayout({ children }) {
   const handleSignOut = () => {
     api.clearTokens();
     router.push("/login");
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    try {
+      await api.post("/social/notifications/mark-all-read");
+      setUnreadNotifsCount(0);
+      setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   if (!currentUser) {
@@ -432,6 +569,7 @@ export default function DashboardLayout({ children }) {
         { name: "Dashboard", href: "/scout", icon: Home },
         { name: "Search Players", href: "/scout/search", icon: Search },
         { name: "Trials Calendar", href: "/scout/trials", icon: Trophy },
+        { name: "Previous Ratings", href: "/scout/ratings", icon: Award },
         { name: "Saved Players", href: "/scout/saved", icon: BookOpen },
         { name: "Scout Reports", href: "/scout/reports", icon: FileText },
         { name: "Messages", href: "/scout/messages", icon: MessageSquare },
@@ -475,13 +613,20 @@ export default function DashboardLayout({ children }) {
         router={router}
         user={currentUser}
         profile={currentProfile}
-        unreadCount={unreadCount}
+        unreadCount={unreadMessagesCount}
         onLogout={handleSignOut}
       />
 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden relative z-10">
-        <Topbar onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)} sidebarCollapsed={sidebarCollapsed} />
+        <Topbar 
+          onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)} 
+          sidebarCollapsed={sidebarCollapsed}
+          notifications={notifications}
+          unreadNotifsCount={unreadNotifsCount}
+          onMarkAllRead={handleMarkAllNotifsRead}
+          router={router}
+        />
 
         {/* Scrollable Content Area */}
         <div className="flex-1 overflow-y-auto" style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(255,255,255,0.08) transparent" }}>

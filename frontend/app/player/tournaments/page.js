@@ -344,11 +344,15 @@ export default function PlayerTournaments() {
                       <div className="space-y-4">
                         <div className="flex justify-between items-start gap-4">
                           <span className={`text-[9px] font-bold text-sm tracking-tight px-3 py-1 rounded-lg border ${
-                            t.myStatus === "accepted"
-                              ? "bg-green-500/20 text-green-400 border-green-500/40"
-                              : "bg-yellow-400/20 text-yellow-400 border-yellow-400/40"
+                            t.isCompleted || t.isRated || t.myStatus === "completed"
+                              ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                              : t.myStatus === "accepted"
+                                ? "bg-green-500/20 text-green-400 border-green-500/40"
+                                : "bg-yellow-400/20 text-yellow-400 border-yellow-400/40"
                           }`}>
-                            {t.myStatus === "accepted" ? "ACCEPTED ✓" : "PENDING SCOUT REVIEW"}
+                            {t.isCompleted || t.isRated || t.myStatus === "completed"
+                              ? (t.scoutScore ? `COMPLETED ✓ (SCORE: ${t.scoutScore}/99)` : "COMPLETED ✓")
+                              : t.myStatus === "accepted" ? "ACCEPTED ✓" : "PENDING SCOUT REVIEW"}
                           </span>
                         </div>
 

@@ -126,17 +126,20 @@ router.get('/', authenticateToken, async (req, res) => {
       profileMap[p.user.toString()] = p;
     });
 
-    // Fetch all scout ratings submitted by this scout for trials
-    const ratings = await ScoutRating.find({ scout: userId, trial: { $ne: null } });
+    // Fetch all scout ratings submitted for trials (either scout or player)
+    const ratings = await ScoutRating.find({ $or: [{ scout: userId }, { player: userId }], trial: { $ne: null } });
     const trialRatingMap = {};
     ratings.forEach(r => {
-      if (r.trial && r.player) {
-        trialRatingMap[`${r.trial.toString()}_${r.player.toString()}`] = r;
+      const tId = r.trial?._id?.toString() || r.trial?.id?.toString() || r.trial?.toString();
+      const pId = r.player?._id?.toString() || r.player?.id?.toString() || r.player?.toString();
+      if (tId && pId) {
+        trialRatingMap[`${tId}_${pId}`] = r;
       }
     });
 
     const enrichedTrials = trials.map(t => {
       const tObj = typeof t.toObject === 'function' ? t.toObject() : t;
+      const trialIdStr = tObj._id?.toString() || tObj.id?.toString();
       const scoutProfile = profileMap[t.scout?._id?.toString() || t.scout?.toString()];
       let resolvedScoutName = scoutProfile?.name;
       if (!resolvedScoutName && t.scout?.email) {
@@ -147,12 +150,26 @@ router.get('/', authenticateToken, async (req, res) => {
 
       const myApp = (tObj.applicants || []).find(a => isPlayerMatch(a.player, userId));
       tObj.isRegistered = !!myApp;
-      tObj.myStatus = myApp ? myApp.status : null;
+
+      const myRating = trialRatingMap[`${trialIdStr}_${userId}`];
+      const isPastDate = tObj.date ? new Date(tObj.date) < new Date() : false;
+      const isTrialCompleted = tObj.status === 'completed' || !!myRating || (isPastDate && myApp?.status === 'accepted');
+
+      tObj.isCompleted = isTrialCompleted;
+      tObj.isRated = !!myRating;
+      tObj.scoutScore = myRating ? myRating.scoutScore : null;
+      tObj.ratingData = myRating || null;
+
+      if (isTrialCompleted && myApp?.status === 'accepted') {
+        tObj.myStatus = 'completed';
+      } else {
+        tObj.myStatus = myApp ? myApp.status : null;
+      }
 
       tObj.applicants = (tObj.applicants || []).map(app => {
-        const pId = app.player?._id?.toString() || app.player?.toString();
+        const pId = app.player?._id?.toString() || app.player?.id?.toString() || app.player?.toString();
         const pProfile = profileMap[pId];
-        const rating = trialRatingMap[`${tObj._id}_${pId}`];
+        const rating = trialRatingMap[`${trialIdStr}_${pId}`];
 
         return {
           ...app,
@@ -161,7 +178,8 @@ router.get('/', authenticateToken, async (req, res) => {
           ageCategory: pProfile?.ageCategory || 'Senior',
           profilePhoto: pProfile?.profilePhoto || '',
           isRated: !!rating,
-          scoutScore: rating ? rating.scoutScore : null
+          scoutScore: rating ? rating.scoutScore : null,
+          ratingData: rating || null
         };
       });
 
@@ -216,6 +234,7 @@ router.post('/', authenticateToken, async (req, res) => {
       location,
       privacy: privacy === 'private' ? 'private' : 'public',
       invitedPlayers: Array.isArray(invitedPlayers) ? invitedPlayers : [],
+      applicants: [],
       status: 'scheduled'
     });
 
@@ -239,7 +258,9 @@ router.post('/', authenticateToken, async (req, res) => {
 
       // Find matching player profiles strictly
       const matchingProfiles = await Profile.find(profileFilter).select('user');
-      const playerIds = matchingProfiles.map(p => p.user);
+      const playerIds = matchingProfiles
+        .map(p => (typeof p.user === 'object' && p.user ? p.user._id || p.user.id : p.user))
+        .filter(Boolean);
 
       // Create notifications strictly for players with selected age & position
       const notifications = playerIds.map(pId => ({
@@ -256,7 +277,10 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     } else if (trial.privacy === 'private' && trial.invitedPlayers.length > 0) {
       // Dispatch direct invitations to invited players
-      const notifications = trial.invitedPlayers.map(pId => ({
+      const notifications = trial.invitedPlayers
+        .map(p => (typeof p === 'object' && p ? p._id || p.id : p))
+        .filter(Boolean)
+        .map(pId => ({
         user: pId,
         type: 'trial',
         title: `📩 Private Scouting Trial Invitation: ${title}`,
@@ -279,11 +303,15 @@ router.post('/', authenticateToken, async (req, res) => {
 router.post('/:id/apply', authenticateToken, async (req, res) => {
   try {
     const trialId = req.params.id;
-    const userId = req.user._id || req.user.id || req.user.userId;
+    const userId = getCleanUserId(req.user);
 
     const trial = await Trial.findById(trialId);
     if (!trial) {
       return res.status(404).json({ error: 'Trial not found.' });
+    }
+
+    if (!Array.isArray(trial.applicants)) {
+      trial.applicants = [];
     }
 
     // Check if already applied
@@ -302,19 +330,22 @@ router.post('/:id/apply', authenticateToken, async (req, res) => {
 
     // Send notification to trial organizer
     const playerProfile = await Profile.findOne({ user: userId });
-    const notif1 = await Notification.create({
-      user: trial.scout,
-      type: 'trial',
-      title: '🎯 New Trial Applicant',
-      message: `${playerProfile?.name || 'A player'} has registered for your trial: "${trial.title}".`,
-      data: { trialId: trial._id, playerId: userId }
-    });
-    emitRealtimeNotification(req, trial.scout, notif1);
+    const organizerId = typeof trial.scout === 'object' && trial.scout ? (trial.scout._id || trial.scout.id) : trial.scout;
+    if (organizerId) {
+      const notif1 = await Notification.create({
+        user: organizerId,
+        type: 'trial',
+        title: '🎯 New Trial Applicant',
+        message: `${playerProfile?.name || 'A player'} has registered for your trial: "${trial.title}".`,
+        data: { trialId: trial._id, playerId: userId }
+      });
+      emitRealtimeNotification(req, organizerId, notif1);
+    }
 
     res.json({ message: 'Successfully registered for trial!', trial });
   } catch (err) {
     console.error('Error applying for trial:', err);
-    res.status(500).json({ error: 'Failed to register for trial.' });
+    res.status(500).json({ error: 'Failed to register for trial: ' + err.message });
   }
 });
 
@@ -322,7 +353,7 @@ router.post('/:id/apply', authenticateToken, async (req, res) => {
 router.put('/:id/applicant', authenticateToken, async (req, res) => {
   try {
     const trialId = req.params.id;
-    const userId = req.user._id || req.user.id || req.user.userId;
+    const userId = getCleanUserId(req.user);
     const { playerId, status } = req.body; // 'pending', 'accepted', 'rejected', 'attended'
 
     const targetPlayerId = typeof playerId === 'object' ? (playerId?._id || playerId?.id || playerId) : playerId;
@@ -332,9 +363,11 @@ router.put('/:id/applicant', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Trial not found or unauthorized.' });
     }
 
-    const applicant = trial.applicants.find(a => 
-      (a.player?._id?.toString() || a.player?.toString() || String(a.player)) === String(targetPlayerId)
-    );
+    if (!Array.isArray(trial.applicants)) {
+      trial.applicants = [];
+    }
+
+    const applicant = trial.applicants.find(a => isPlayerMatch(a.player, targetPlayerId));
     if (!applicant) {
       return res.status(404).json({ error: 'Applicant not found.' });
     }
@@ -343,19 +376,21 @@ router.put('/:id/applicant', authenticateToken, async (req, res) => {
     await trial.save();
 
     // Notify player of decision
-    const notif2 = await Notification.create({
-      user: targetPlayerId,
-      type: 'trial',
-      title: `Trial Registration Updated (${status.toUpperCase()})`,
-      message: `Your status for "${trial.title}" has been updated to: ${status.toUpperCase()}.`,
-      data: { trialId: trial._id }
-    });
-    emitRealtimeNotification(req, targetPlayerId, notif2);
+    if (targetPlayerId) {
+      const notif2 = await Notification.create({
+        user: targetPlayerId,
+        type: 'trial',
+        title: `Trial Registration Updated (${status.toUpperCase()})`,
+        message: `Your status for "${trial.title}" has been updated to: ${status.toUpperCase()}.`,
+        data: { trialId: trial._id }
+      });
+      emitRealtimeNotification(req, targetPlayerId, notif2);
+    }
 
     res.json({ message: `Applicant status updated to ${status}.`, trial });
   } catch (err) {
     console.error('Error updating applicant status:', err);
-    res.status(500).json({ error: 'Failed to update applicant status.' });
+    res.status(500).json({ error: 'Failed to update applicant status: ' + err.message });
   }
 });
 
@@ -363,14 +398,18 @@ router.put('/:id/applicant', authenticateToken, async (req, res) => {
 router.post('/:id/decline', authenticateToken, async (req, res) => {
   try {
     const trialId = req.params.id;
-    const userId = req.user._id || req.user.id || req.user.userId;
+    const userId = getCleanUserId(req.user);
 
     const trial = await Trial.findById(trialId);
     if (!trial) {
       return res.status(404).json({ error: 'Trial not found.' });
     }
 
-    const existingApplicant = trial.applicants.find(a => a.player.toString() === userId.toString());
+    if (!Array.isArray(trial.applicants)) {
+      trial.applicants = [];
+    }
+
+    const existingApplicant = trial.applicants.find(a => isPlayerMatch(a.player, userId));
     if (existingApplicant) {
       existingApplicant.status = 'rejected';
     } else {
@@ -384,19 +423,22 @@ router.post('/:id/decline', authenticateToken, async (req, res) => {
     await trial.save();
 
     // Notify organizer of declined invitation
-    const notif3 = await Notification.create({
-      user: trial.scout,
-      type: 'trial',
-      title: 'Invitation Declined',
-      message: `A player has declined your invitation for trial: "${trial.title}".`,
-      data: { trialId: trial._id, playerId: userId }
-    });
-    emitRealtimeNotification(req, trial.scout, notif3);
+    const organizerId = typeof trial.scout === 'object' && trial.scout ? (trial.scout._id || trial.scout.id) : trial.scout;
+    if (organizerId) {
+      const notif3 = await Notification.create({
+        user: organizerId,
+        type: 'trial',
+        title: 'Invitation Declined',
+        message: `A player has declined your invitation for trial: "${trial.title}".`,
+        data: { trialId: trial._id, playerId: userId }
+      });
+      emitRealtimeNotification(req, organizerId, notif3);
+    }
 
     res.json({ message: 'Trial invitation declined.', trial });
   } catch (err) {
     console.error('Error declining trial:', err);
-    res.status(500).json({ error: 'Failed to decline trial.' });
+    res.status(500).json({ error: 'Failed to decline trial: ' + err.message });
   }
 });
 

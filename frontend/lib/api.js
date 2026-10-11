@@ -57,8 +57,8 @@ export async function apiRequest(endpoint, options = {}) {
   try {
     let response = await fetch(url, config);
     
-    // Auto-refresh token if 401 or 403 token error (only for protected resource endpoints, NOT auth endpoints)
-    if (!isAuthEndpoint && (response.status === 401 || response.status === 403) && getRefreshToken()) {
+    // Auto-refresh token if 401 unauthenticated (only for protected resource endpoints, NOT auth endpoints)
+    if (!isAuthEndpoint && response.status === 401 && getRefreshToken()) {
       console.log('Access token invalid/expired, attempting refresh...');
       const refreshed = await refreshAccessToken();
       if (refreshed) {
@@ -70,8 +70,8 @@ export async function apiRequest(endpoint, options = {}) {
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      // Clear invalid session if authentication fails on protected endpoints
-      if (!isAuthEndpoint && (response.status === 401 || response.status === 403)) {
+      // Clear invalid session only if authentication fails (401) on protected endpoints
+      if (!isAuthEndpoint && response.status === 401) {
         clearTokens();
         if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
           window.location.href = '/login';
