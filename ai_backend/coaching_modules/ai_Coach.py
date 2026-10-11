@@ -72,10 +72,9 @@ def analyze_shooting(video_path, show_visuals=False):
     left_leg_history = deque(maxlen=60)
     session_log = [] # Stores detailed data for the final report
     all_flexion_angles = []
-
-    prev_right_ankle_y = None
-    prev_left_ankle_y = None
-
+    prev_right_ankle_pos = None
+    prev_left_ankle_pos = None
+    all_torso_leans = []
     # --- PRE-ANALYSIS POSE VERIFICATION LAYER ---
     sample_cap = cv2.VideoCapture(video_path)
     sampled = 0
@@ -123,13 +122,20 @@ def analyze_shooting(video_path, show_visuals=False):
         h, w, _ = frame.shape
         results = pose_model(frame, verbose=False, conf=0.25)
         
+        # Primary athlete selection: lock onto the most prominent athlete (largest bbox area)
         keypoints = None
+        best_area = 0
         for r in results:
             if r.keypoints is not None and len(r.keypoints.xy) > 0:
-                kpts = r.keypoints.xy[0].cpu().numpy()
-                if len(kpts) >= 17:
-                    keypoints = kpts
-                    break
+                for kpts in r.keypoints.xy:
+                    kpts_np = kpts.cpu().numpy()
+                    if len(kpts_np) >= 17:
+                        valid_pts = kpts_np[kpts_np[:, 0] > 0]
+                        if len(valid_pts) >= 10:
+                            area = (np.max(valid_pts[:, 0]) - np.min(valid_pts[:, 0])) * (np.max(valid_pts[:, 1]) - np.min(valid_pts[:, 1]))
+                            if area > best_area:
+                                best_area = area
+                                keypoints = kpts_np
         
         if keypoints is not None:
             # Get COCO Keypoint Coordinates (Right & Left)
@@ -141,6 +147,24 @@ def analyze_shooting(video_path, show_visuals=False):
             l_knee = keypoints[13]  # Left Knee
             l_ankle = keypoints[15] # Left Ankle
 
+            # Measure scale-invariant anatomical reference (leg length)
+            leg_ref = 200.0
+            if r_hip[0] > 0 and r_ankle[0] > 0:
+                leg_ref = max(50.0, np.linalg.norm(r_hip - r_ankle))
+            elif l_hip[0] > 0 and l_ankle[0] > 0:
+                leg_ref = max(50.0, np.linalg.norm(l_hip - l_ankle))
+
+            # Torso lean angle (shoulders to hips relative to vertical)
+            torso_lean_deg = 0.0
+            r_shoulder, l_shoulder = keypoints[6], keypoints[5]
+            if r_shoulder[0] > 0 and l_shoulder[0] > 0 and r_hip[0] > 0 and l_hip[0] > 0:
+                mid_shoulder = (r_shoulder + l_shoulder) / 2.0
+                mid_hip = (r_hip + l_hip) / 2.0
+                dx = mid_shoulder[0] - mid_hip[0]
+                dy = mid_hip[1] - mid_shoulder[1] # positive upward
+                if dy > 0:
+                    torso_lean_deg = round(float(np.arctan2(dx, dy) * 180.0 / np.pi), 1)
+
             r_vel = 0.0
             l_vel = 0.0
             
@@ -148,28 +172,30 @@ def analyze_shooting(video_path, show_visuals=False):
                 r_angle = calculate_angle(r_hip, r_knee, r_ankle)
                 right_leg_history.append(r_angle)
                 all_flexion_angles.append(r_angle)
-                if prev_right_ankle_y is not None:
-                    r_vel = abs(r_ankle[1] - prev_right_ankle_y) / h * 1000.0
-                prev_right_ankle_y = r_ankle[1]
+                if prev_right_ankle_pos is not None:
+                    # 2D Euclidean vector velocity normalized by anatomical leg length
+                    r_vel = (np.linalg.norm(r_ankle - prev_right_ankle_pos) / leg_ref) * 100.0
+                prev_right_ankle_pos = r_ankle.copy()
                 
             if l_hip[0] > 0 and l_knee[0] > 0 and l_ankle[0] > 0:
                 l_angle = calculate_angle(l_hip, l_knee, l_ankle)
                 left_leg_history.append(l_angle)
                 all_flexion_angles.append(l_angle)
-                if prev_left_ankle_y is not None:
-                    l_vel = abs(l_ankle[1] - prev_left_ankle_y) / h * 1000.0
-                prev_left_ankle_y = l_ankle[1]
+                if prev_left_ankle_pos is not None:
+                    # 2D Euclidean vector velocity normalized by anatomical leg length
+                    l_vel = (np.linalg.norm(l_ankle - prev_left_ankle_pos) / leg_ref) * 100.0
+                prev_left_ankle_pos = l_ankle.copy()
 
             # --- SHOT DETECTION LOGIC ---
             if cooldown_counter == 0:
                 kick_leg = None
                 history = None
                 
-                # Detect Kick motion
-                if r_vel > 12:
+                # Detect Kick motion (scale-invariant velocity threshold)
+                if r_vel > 16.0:
                     kick_leg = "RIGHT"
                     history = right_leg_history
-                elif l_vel > 12:
+                elif l_vel > 16.0:
                     kick_leg = "LEFT"
                     history = left_leg_history
                 
@@ -185,12 +211,16 @@ def analyze_shooting(video_path, show_visuals=False):
                         elif best_backswing < 85:
                             rating = "PRO"
 
+                        lean_eval = "Chest over ball (Optimal)" if -10 <= torso_lean_deg <= 15 else "Leaning back (Risk of high shot)" if torso_lean_deg < -10 else "Leaning forward"
+
                         timestamp = round(frame_count / FRAME_RATE, 1)
                         shot_data = {
                             "id": len(session_log) + 1,
                             "time": timestamp,
                             "leg": kick_leg,
                             "flexion": int(best_backswing),
+                            "torso_lean_deg": torso_lean_deg,
+                            "posture": lean_eval,
                             "rating": rating
                         }
                         session_log.append(shot_data)
@@ -244,27 +274,33 @@ def analyze_shooting(video_path, show_visuals=False):
     avg_flexion = int(total_flexion / len(session_log))
     consistency = int((pro_shots / len(session_log)) * 100)
     
+    avg_lean = 0.0
+    leans = [s.get('torso_lean_deg', 0.0) for s in session_log if 'torso_lean_deg' in s]
+    if leans:
+        avg_lean = round(float(np.mean(leans)), 1)
+        
     stats = {
         "total_shots": len(session_log),
         "avg_flexion": avg_flexion,
+        "avg_torso_lean_deg": avg_lean,
         "consistency_percent": consistency
     }
 
     prompt = f"""
     You are an elite Premier League Striker/Shooting Coach.
-    Analyze this training session data:
+    Analyze this biomechanical training session data:
     
-    - Total Shots: {len(session_log)}
-    - Average Knee Flexion (Backswing): {avg_flexion}°
-    - Consistency: {consistency}% of shots had Pro/World Class flexion
-    - Chronological list of shots: {session_log}
-    
-    Pro Benchmarks: <70° is Elite/Pro flexion (good backswing). >85° is stiff mechanics.
+    - Total Shots Detected: {len(session_log)}
+    - Average Knee Flexion (Backswing): {avg_flexion}° (Elite < 70°, Stiff > 85°)
+    - Average Torso Posture: {avg_lean}° lean relative to vertical (Optimal chest over ball: -10° to +15°)
+    - Flexion Consistency: {consistency}% of shots had Pro/World Class flexion
+    - Shot History & Biomechanics: {session_log}
     
     Task:
-    1. Give a "Scout Grade" (A, B, C).
-    2. Suggest 1 specific technical adjustment based on their flexion data.
-    3. Keep it short, motivating, and professional.
+    1. Give a "Scout Grade" (A, B, or C).
+    2. Analyze both Knee Backswing ({avg_flexion}°) AND Torso Posture ({avg_lean}°).
+    3. Suggest 1 specific technical adjustment (e.g. leaning chest over ball or deeper plant knee flexion).
+    4. Keep it concise, structured with bullet points, and professional.
     """
 
     report_text = get_ollama_feedback(prompt)
