@@ -111,14 +111,33 @@ def analyze_dribbling(video_path, show_visuals=False):
         # 1. Pose estimation for player keypoints (Run first)
         pose_results = pose_model(frame, verbose=False, conf=0.25)
         keypoints = None
+        best_area = 0
         for r in pose_results:
             if r.keypoints is not None and len(r.keypoints.xy) > 0:
-                kpts = r.keypoints.xy[0].cpu().numpy()
-                if len(kpts) >= 17:
-                    keypoints = kpts
-                    break
+                for kpts in r.keypoints.xy:
+                    kpts_np = kpts.cpu().numpy()
+                    if len(kpts_np) >= 17:
+                        valid_pts = kpts_np[kpts_np[:, 0] > 0]
+                        if len(valid_pts) >= 10:
+                            area = (np.max(valid_pts[:, 0]) - np.min(valid_pts[:, 0])) * (np.max(valid_pts[:, 1]) - np.min(valid_pts[:, 1]))
+                            if area > best_area:
+                                best_area = area
+                                keypoints = kpts_np
 
-        # 2. ROI-based Detection for sports ball
+        # Anatomical scale reference (leg length)
+        leg_ref = 220.0
+        if keypoints is not None:
+            r_hip, l_hip = keypoints[12], keypoints[11]
+            r_ankle, l_ankle = keypoints[16], keypoints[15]
+            if r_hip[0] > 0 and r_ankle[0] > 0:
+                leg_ref = max(60.0, np.linalg.norm(r_hip - r_ankle))
+            elif l_hip[0] > 0 and l_ankle[0] > 0:
+                leg_ref = max(60.0, np.linalg.norm(l_hip - l_ankle))
+
+        # Dynamic, scale-invariant control threshold (42% of leg length ~ roughly 1 ball + shoe span)
+        dynamic_control_thresh = max(35.0, leg_ref * 0.42)
+
+        # 2. Adaptive ROI-based Detection for sports ball
         ball_pos = None
         roi_used = False
         
@@ -140,7 +159,8 @@ def analyze_dribbling(video_path, show_visuals=False):
                 cy_feet = int(sum(valid_y) / len(valid_y))
                 
                 h, w, _ = frame.shape
-                crop_size = 350
+                # Adapt crop box to player scale
+                crop_size = int(max(240, min(550, leg_ref * 1.5)))
                 half_crop = crop_size // 2
                 
                 x1_crop = max(0, cx_feet - half_crop)
@@ -199,7 +219,8 @@ def analyze_dribbling(video_path, show_visuals=False):
                 dist_r = np.linalg.norm(np.array(right_ankle) - np.array(ball_pos)) if right_ankle[0] > 0 else 9999
                 closest_dist = min(dist_l, dist_r)
                 
-                if closest_dist < CONTROL_THRESHOLD_PX:
+                # Scale-invariant evaluation
+                if closest_dist < dynamic_control_thresh:
                     control_frames += 1
                     color = (0, 255, 0)
                     status = "CONTROL"
